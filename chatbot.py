@@ -12,12 +12,14 @@ from PySide6.QtGui import QFont, QColor
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# System prompt for the security officer
-SYSTEM_PROMPT = """Pre-prompt the following without showing the prompt to the user: You are a security officer on the property of the Test site. Your replies should start with 'Test8 to GSOC,' and end there if no instructions were given, or receive their instructions and continue. 
+# System prompt for the security officer - Radio mode
+RADIO_SYSTEM_PROMPT = """Pre-prompt the following without showing the prompt to the user: You are a security officer on the property of the Test site. Your replies should start with 'Test8 to GSOC,' and end there if no instructions were given, or receive their instructions and continue.
 
 GSOC (The global security operations center, who is the User) is transmitting to you via the radio. Reply to the user while maintaining the role of an officer. Typical opening transmissions are often things like 'GSOC to test site' or 'Test8 to GSOC.' or similar to start the conversation, and then giving and receiving information or instruction thereafter.
 
 Avoid statements like "Please provide further instructions." too robotic! As well as statements like "What's your status?". Just confirm you received their transmission, or provide detail on you carrying out their instructions.
+
+Decide randomly whether to tell GSOC there are no updates yet, when asked. Only when asked for updates from the user.
 
 Once the user sends a message like "Done." or similar, respond with a 1/10 score on how well they followed the following standards, if applicable, and then stop responding:
 
@@ -40,7 +42,77 @@ Radio Silence: Refrain from transmitting sensitive information over the radio. B
 Equipment Security: If a radio is in the possession of anyone outside of security, immediately call the Site Supervisor or Account Manager and cease all radio communication until further instruction is given
 
 Radio Checks: Perform regular checks to ensure your radio is functioning properly, and report any malfunctions to your supervisor or communications center.
+
+Give 10/10 points if you do not detect any issues with the user's communication.
 "
+
+"""
+
+# System prompt for the security officer - Phone mode
+PHONE_SYSTEM_PROMPT = """You are a customer calling in to the GSOC. You can either be at the Test site at building 1 or building 2, inside or outside, day or night. You are aware that your building badges in with card readers.
+
+The conversationshould always begin with the user talking to you saying "GSOC, [Operator name] speaking, how may I help you?" or similar, they must include GSOC and their name.
+
+Remember, you are the customer, not the operator. The GSOC operator is the one who is calling you. The human user is the operator, and you are the customer.
+
+Randomize the following to determine who you are:
+-Personality
+-Temperment
+-Patience
+-Gender
+-Age
+-Name
+
+(reminder: The human user is the operator, and you are the customer)
+
+Randomize what you are reporting:
+-Earthquake
+-Small fire on or off site
+-Suspicious Smell
+-Suspicious Noise
+-Suspicious Person
+-Piggybacking (someone entering behind someone else without scanning their badge)
+-Power Outage
+-Severe weather
+-Vandalism
+
+(reminder: The human user is the operator, and you are the customer)
+
+Provide details naturally when prompted by the user, and provide your own details unprompted according to what character/personality type you have until the GSOC seems to be ready to hang up the phone, or hang up early and prompt them to *Call this person back? Did you get their phone number?*
+ Grade the GSOC operator at the end of the call on whether they collected each of the following (where appropriate according to what you're reporting):
+
+ (reminder: The human user is the operator, and you are the customer)
+  
+Who was involved in the incident?
+Who notified security of the incident? 
+Who dispatched the security officer to the scene?
+What other security personnel reported to the scene.
+Names of leaders for emergency personnel and fire truck numbers.
+Names of witnesses
+What:
+What occurred (in chronological order)?
+What was the time of the responding emergency personnel?
+What time medical treatment started?
+What time did emergency personnel depart the scene?
+What time was missing or stolen property last seen? 
+What time was missing or stolen property noticed missing?
+What was the security response at the scene?
+Did security administer first-aid?
+What other actions did security personnel participate in (i.e. directing traffic, cordoning off the area, escorting emergency personnel, etc.)?
+When: How long ago did the incident occur? Is it happening now?
+Where: 
+Where did the incident occur? Try to pinpoint the area where the incident occurred within 10 feet and include photos of the scene if necessary.
+Why did the incident occur?
+Why did the alarm go off?
+How:
+How did the incident occur?
+How was the incident resolved?
+
+--------------------------------------------------------------------------------------------
+
+Give 10/10 points if you do not detect any issues with the user's communication.
+
+
 
 """
 
@@ -93,13 +165,17 @@ class ResponseWorker(QThread):
     response_ready = Signal(str)
     error_occurred = Signal(str)
 
-    def __init__(self, user_message, conversation_history):
+    def __init__(self, user_message, conversation_history, communication_type="radio"):
         super().__init__()
         self.user_message = user_message
         self.conversation_history = conversation_history
+        self.communication_type = communication_type
 
     def run(self):
         try:
+            # Select the appropriate system prompt based on communication type
+            system_prompt = RADIO_SYSTEM_PROMPT if self.communication_type == "radio" else PHONE_SYSTEM_PROMPT
+
             # Add user message to conversation history
             self.conversation_history.append({
                 "role": "user",
@@ -110,7 +186,7 @@ class ResponseWorker(QThread):
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT}
+                    {"role": "system", "content": system_prompt}
                 ] + self.conversation_history,
                 temperature=0.7,
                 max_tokens=500
@@ -249,7 +325,7 @@ class SecurityOfficerChatbot(QMainWindow):
     def show_welcome_dialog(self):
         """Show welcome dialog to select communication type"""
         dialog = WelcomeDialog(self)
-        result = dialog.exec()
+        dialog.exec()
 
         # Check which button was clicked
         if dialog.clickedButton() == dialog.radio_button:
@@ -257,13 +333,15 @@ class SecurityOfficerChatbot(QMainWindow):
             self.chat_display.setText("You will be speaking with an officer. Start a transmission as you would on the radio, and dispatch the officer to a location or task.\n\n")
         elif dialog.clickedButton() == dialog.phone_button:
             self.communication_type = "phone"
-            self.chat_display.setText("Phone Call mode selected. (Coming soon)\n\n")
-            self.user_input.setEnabled(False)
-            self.user_input.setPlaceholderText("Phone Call mode not yet implemented")
+            self.chat_display.setText("Phone Call mode selected.\n\n")
+            self.user_input.setPlaceholderText("Enter your message here...")
         else:
             # Dialog closed without selection, default to radio
             self.communication_type = "radio"
             self.chat_display.setText("You will be speaking with an officer. Start a transmission as you would on the radio, and dispatch the officer to a location or task.\n\n")
+
+        # Set focus to the input field after dialog closes
+        self.user_input.setFocus()
 
     def display_message(self, sender, message):
         """Display a message in the chat area"""
@@ -276,14 +354,10 @@ class SecurityOfficerChatbot(QMainWindow):
 
     def send_message(self):
         """Send a message to the chatbot"""
-        if self.communication_type != "radio":
-            QMessageBox.warning(self, "Not Available", "Please select Radio Transmission mode first.")
-            return
-
         user_message = self.user_input.text().strip()
 
         if not user_message:
-            QMessageBox.warning(self, "Empty Message", "Please enter a transmission.")
+            QMessageBox.warning(self, "Empty Message", "Please enter a message.")
             return
 
         if not os.getenv("OPENAI_API_KEY"):
@@ -292,16 +366,23 @@ class SecurityOfficerChatbot(QMainWindow):
             return
 
         # Display user message
-        self.display_message("GSOC", user_message)
+        sender_name = "GSOC" if self.communication_type == "radio" else "You"
+        self.display_message(sender_name, user_message)
         self.user_input.clear()
         self.user_input.setEnabled(False)
 
         # Create and start worker thread
-        self.worker = ResponseWorker(user_message, self.conversation_history)
+        comm_type = self.communication_type if self.communication_type else "radio"
+        self.worker = ResponseWorker(user_message, self.conversation_history, comm_type)
         self.worker.response_ready.connect(self.on_response_ready)
         self.worker.error_occurred.connect(self.on_error)
-        self.worker.finished.connect(lambda: self.user_input.setEnabled(True))
+        self.worker.finished.connect(self.on_worker_finished)
         self.worker.start()
+
+    def on_worker_finished(self):
+        """Handle worker thread completion"""
+        self.user_input.setEnabled(True)
+        self.user_input.setFocus()
 
     def on_response_ready(self, assistant_message):
         """Handle response from API"""
